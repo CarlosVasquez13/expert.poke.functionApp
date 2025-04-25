@@ -1,0 +1,6 @@
+
+azure-functions
+requests
+python-dotenv
+pandas
+azure-storage-blob==12.22.0
