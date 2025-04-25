@@ -27,24 +27,31 @@ STORAGE_ACCOUNT_NAME = os.getenv("STORAGE_ACCOUNT_NAME")
         connection="QueueAzureWebJobsStorage"
         ) 
 def QueueTriggerPokeReport(azqueue: func.QueueMessage):
-    body = azqueue.get_body().decode('utf-8')
-    record = json.loads(body)
-    id = record[0]["id"]
-    sample_size = record[0].get("sample_size", None)
-    print(f"id 1: {id}")
-    update_request(id, "inprogress")
-    print(f"sample size 1: {sample_size}")
-    request_info = get_request(id)
-    pokemons = get_pokemons(request_info[0]["type"], sample_size = sample_size)
-    pokemon_bytes = generate_csv_to_blob(pokemons)
-    blob_name = f"poke_report_{id}.csv"
-    upload_csv_to_blob( blob_name, csv_data=pokemon_bytes)
-    logger.info(f"Archivo CSV subido a Blob Storage: {blob_name}")
+    try:
+        body = azqueue.get_body().decode('utf-8')
+        record = json.loads(body)
+        id = record[0]["id"]
+        sample_size = record[0].get("sample_size", None)
+        print(f"id 1: {id}")
+        update_request(id, "inprogress")
+        print(f"sample size 1: {sample_size}")
+        request_info = get_request(id)
+        pokemons = get_pokemons(request_info[0]["type"], sample_size = sample_size)
 
-    url_completa = f"https://{STORAGE_ACCOUNT_NAME}.blob.core.windows.net/{BLOB_CONTAINER_NAME}/{blob_name}"
+        pokemons_with_stats = get_pokemons_stats(pokemons)
 
-    update_request(id, "completed", url_completa)
+        pokemon_bytes = generate_csv_to_blob(pokemons_with_stats)
+        blob_name = f"poke_report_{id}.csv"
+        upload_csv_to_blob( blob_name, csv_data=pokemon_bytes)
+        logger.info(f"Archivo CSV subido a Blob Storage: {blob_name}")
 
+        url_completa = f"https://{STORAGE_ACCOUNT_NAME}.blob.core.windows.net/{BLOB_CONTAINER_NAME}/{blob_name}"
+
+        update_request(id, "completed", url_completa)
+    except Exception as e:
+        logger.error(f"Error processing queue message: {e}")
+        update_request(id, "failed")
+        raise
 
 def update_request( id: int, status: str, url:str = None) -> dict:
     payload = {
@@ -72,6 +79,29 @@ def get_pokemons(type: str, sample_size: int = None) -> dict:
         pokemon_entries = random.sample(pokemon_entries, sample_size)
 
     return [ p["pokemon"] for p in pokemon_entries]
+
+# Obtiene las estadisticas de cada pokemon
+def get_pokemons_stats(pokemons) -> list:
+    pokemons_with_stats = []
+    for pokemon in pokemons:
+        try:
+            pokemon_info = requests.get(pokemon["url"], timeout=3000)
+            pokemon_info.raise_for_status()  # Raise an HTTPError for bad responses (4xx and 5xx)
+            data_info = pokemon_info.json()
+
+            stats = {stat["stat"]["name"]: stat["base_stat"] for stat in data_info["stats"]}
+            abilities = {ability["ability"]["name"] for ability in data_info["abilities"]}
+            
+            pokemon_with_stats = {**pokemon, **stats, "abilities": ", ".join(abilities)}
+            pokemons_with_stats.append(pokemon_with_stats)
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching data for Pokemon {pokemon['name']}: {e}")
+        except KeyError as e:
+            logger.error(f"Missing expected data for Pokemon {pokemon['name']}: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error for Pokemon {pokemon['name']}: {e}")
+
+    return pokemons_with_stats
 
 #transforma la lista de los pokemones a un csv
 def generate_csv_to_blob( pokemon_list ) -> bytes:
